@@ -9,14 +9,14 @@ fastapi==0.109.0
 # ASGI server for production deployment
 uvicorn[standard]==0.27.0
 
-# Request validation and serialization (mistralai 1.0.0 requires >=2.8.2,<2.9.0)
-pydantic>=2.8.2,<2.9.0
+# Request validation and serialization (let pip resolve compatible version)
+pydantic>=2.11.0
 
 # Phase 2: State Management - Upstash Redis SDK
 upstash-redis==0.15.0
 
 # Phase 3: LLM Orchestration - Mistral AI SDK
-mistralai==1.0.0
+mistralai>=1.5.0
 
 # Phase 4: Database & Storage - Supabase Client
 supabase==2.18.0
