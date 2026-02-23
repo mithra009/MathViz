@@ -22,6 +22,8 @@ from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from upstash_redis import Redis
 from mistralai import Mistral
@@ -104,13 +106,8 @@ app = FastAPI(
 # Configure CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # React dev server
-        "http://localhost:5173",  # Vite default port
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -717,7 +714,7 @@ def execute_manim_legacy(job_id: str, code: str, scene_name: str, quality: str =
 
 # Core Endpoints
 
-@app.get("/", response_model=dict)
+@app.get("/api", response_model=dict)
 async def root():
     """Root endpoint with service information"""
     return {
@@ -997,7 +994,33 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("Service shutting down...")
 
+# Serve frontend static files (must be mounted after all API routes)
+_frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
+if _frontend_dist.exists():
+    # Add /api/* aliases so the frontend (which uses /api/render etc.) works in production
+    app.add_api_route("/api/render", render, methods=["POST"], response_model=RenderResponse)
+    app.add_api_route("/api/status/{job_id}", get_job_status, methods=["GET"], response_model=JobStatusResponse)
+
+    # Mount static assets
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="assets")
+
+    # Catch-all: serve index.html for all unmatched routes (SPA routing)
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        file_path = _frontend_dist / full_path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(_frontend_dist / "index.html"))
+
+    @app.get("/")
+    async def serve_root():
+        return FileResponse(str(_frontend_dist / "index.html"))
+
+    logger.info(f"Serving frontend from {_frontend_dist}")
+else:
+    logger.warning(f"Frontend dist not found at {_frontend_dist} - serving API only")
+
 # Entry point
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=7860)
