@@ -1,6 +1,13 @@
 # Phase 1 & 2: Manim Rendering Node - Optimized Compute Layer with State Management
-# Base Image Substitution (Constraint #1)
-# Using python:3.9-slim instead of official 4.49GB manimcommunity/manim
+# Multi-stage build: Stage 1 builds the frontend
+FROM node:18-slim AS frontend-builder
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# Stage 2: Python backend with built frontend
 FROM python:3.9-slim
 
 # Set working directory
@@ -46,6 +53,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code (new src structure)
 COPY src/ ./src/
+
+# Copy built frontend from stage 1
+COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 # Switch to non-root user (Constraint #4)
 USER manim_user
