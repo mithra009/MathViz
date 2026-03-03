@@ -17,10 +17,17 @@ USER root
 # Set working directory
 WORKDIR /app
 
-# Create non-root user with UID 1000 for HuggingFace Spaces compliance
-RUN useradd -m -u 1000 manim_user && \
-    mkdir -p /tmp && \
-    chown -R manim_user:manim_user /tmp /app
+# HuggingFace Spaces requires UID 1000. The base image already has a user
+# with UID 1000, so reuse it (or create if missing) and ensure /tmp and /app
+# are writable.
+RUN existing_user=$(getent passwd 1000 | cut -d: -f1) && \
+    if [ -z "$existing_user" ]; then \
+        useradd -m -u 1000 manim_user; \
+    else \
+        usermod -l manim_user -d /home/manim_user -m "$existing_user" 2>/dev/null || true; \
+    fi && \
+    mkdir -p /tmp /home/manim_user && \
+    chown -R 1000:1000 /tmp /app /home/manim_user
 
 # Copy requirements and install extra Python dependencies
 # (Manim itself is already installed in the base image)
