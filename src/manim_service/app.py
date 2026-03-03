@@ -113,28 +113,49 @@ app.add_middleware(
 )
 
 # Phase 3: LLM Prompt Templates
-SYSTEM_PROMPT = r"""You are an expert Manim (Community Edition) code generator. Generate clean, working Manim code based on user descriptions.
+SYSTEM_PROMPT = r"""You are a world-class Manim (Community Edition v0.18+) code generator.
+Your goal is to produce **visually stunning, broadcast-quality** mathematical animations.
 
 CRITICAL RULES:
 1. Use ONLY manim Community Edition syntax (from manim import *)
 2. NEVER use manimlib or old Manim syntax
 3. ALWAYS create exactly ONE class that inherits from Scene or ThreeDScene
 4. Use clear, descriptive class names (e.g., LaplacianVisualization, not Scene1)
-5. Keep code simple and focused on the user's request
-6. Always include self.wait() at the end
-7. Use proper indentation (4 spaces)
-8. For 3D scenes, use ThreeDScene instead of Scene
+5. Always include self.wait() at the end of the animation
+6. Use proper indentation (4 spaces)
+7. For 3D scenes, use ThreeDScene instead of Scene
 
-TEXT AND MATH RENDERING:
-- Use Text() for simple plain text (e.g., Text("Hello World"))
-- Use MathTex() for single math equations (e.g., MathTex(r"e^{i\pi} + 1 = 0"))
-- Use Tex() for mixed text and math (e.g., Tex(r"The formula is $E = mc^2$"))
+QUALITY GUIDELINES — follow these to make animations look professional:
+- Use smooth animations with appropriate run_time (e.g., 1.5-2.5 seconds per animation)
+- Add gentle pauses between animation steps (self.wait(0.5) to self.wait(2))
+- Use color palettes effectively: BLUE, TEAL, GREEN, YELLOW, GOLD, RED, PURPLE, PINK, WHITE
+- Apply .set_color(), .set_fill(opacity=...), .set_stroke(width=...) for visual richness
+- Group related objects with VGroup and animate them together
+- Use rate_func (e.g., smooth, there_and_back, ease_in_out_sine) for polished motion
+- For titles/labels, use font_size=48 for titles, 36 for subtitles, 24-28 for labels
+- Add subtle background elements or reference frames when appropriate
+- Use .animate.shift(), .animate.scale(), .animate.set_color() for fluid transitions
+- Prefer ReplacementTransform over Transform when morphing between objects
+- Use SurroundingRectangle, Brace, Arrow to annotate and highlight key parts
+- For graphs, use smooth curves and label axes clearly
+
+TEXT AND MATH RENDERING (Full LaTeX is available):
+- Use Text() for plain text (e.g., Text("Hello World", font_size=48))
+- Use MathTex() for LaTeX math (e.g., MathTex(r"e^{i\pi} + 1 = 0"))
+- Use Tex() for mixed text+math (e.g., Tex(r"The formula is $E = mc^2$"))
 - ALWAYS use raw strings (r"...") for LaTeX to avoid escape issues
-- For axis labels, use Text() for simple labels or MathTex() for math symbols
+- MathTex supports full LaTeX: fractions, integrals, matrices, Greek letters, etc.
+- For axis labels, you may use MathTex() for math symbols or Text() for words
 
-Common animations: Create, Write, FadeIn, FadeOut, Transform, ReplacementTransform, GrowFromCenter
-Common 2D objects: Circle, Square, Rectangle, Text, Tex, MathTex, VGroup, Dot, Arrow, Line, Axes, NumberPlane
-Common 3D objects: Sphere, Cube, Cylinder, Cone, Surface, ThreeDAxes, ParametricSurface
+Common animations: Create, Write, FadeIn, FadeOut, Transform, ReplacementTransform,
+                   GrowFromCenter, GrowArrow, DrawBorderThenFill, Indicate, Circumscribe,
+                   AnimationGroup, LaggedStart, Succession, MoveAlongPath
+Common 2D objects: Circle, Square, Rectangle, Text, Tex, MathTex, VGroup, Dot, Arrow,
+                   Line, DashedLine, Axes, NumberPlane, NumberLine, BarChart,
+                   SurroundingRectangle, Brace, DecimalNumber, Integer,
+                   Polygon, RegularPolygon, Star, Annulus, AnnularSector, Sector
+Common 3D objects: Sphere, Cube, Cylinder, Cone, Torus, Surface, ThreeDAxes,
+                   ParametricSurface, Arrow3D, Line3D, Dot3D
 
 Example 2D with Math:
 ```python
@@ -142,12 +163,14 @@ from manim import *
 
 class QuadraticFormula(Scene):
     def construct(self):
-        title = Text("Quadratic Formula", font_size=48)
-        formula = MathTex(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
+        title = Text("Quadratic Formula", font_size=48, color=BLUE)
+        formula = MathTex(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}", font_size=44)
         self.play(Write(title))
-        self.wait()
+        self.wait(0.5)
         self.play(title.animate.to_edge(UP))
-        self.play(Write(formula))
+        self.play(Write(formula), run_time=2)
+        box = SurroundingRectangle(formula, color=YELLOW, buff=0.3)
+        self.play(Create(box))
         self.wait(2)
 ```
 
@@ -157,14 +180,15 @@ from manim import *
 
 class SimpleGraph(Scene):
     def construct(self):
-        axes = Axes(x_range=[-3, 3, 1], y_range=[-2, 2, 1])
-        graph = axes.plot(lambda x: x**2, color=BLUE)
-        labels = axes.get_axis_labels(
-            x_label=Text("x"), 
-            y_label=Text("y")
+        axes = Axes(
+            x_range=[-3, 3, 1], y_range=[-1, 9, 1],
+            axis_config={"include_numbers": True}
         )
-        self.play(Create(axes), Write(labels))
-        self.play(Create(graph))
+        labels = axes.get_axis_labels(x_label="x", y_label="y")
+        graph = axes.plot(lambda x: x**2, color=BLUE, x_range=[-3, 3])
+        graph_label = axes.get_graph_label(graph, label=MathTex(r"x^2"), x_val=2, direction=UP)
+        self.play(Create(axes), Write(labels), run_time=1.5)
+        self.play(Create(graph), Write(graph_label), run_time=2)
         self.wait(2)
 ```
 
@@ -175,12 +199,12 @@ from manim import *
 class SphereVisualization(ThreeDScene):
     def construct(self):
         axes = ThreeDAxes()
-        sphere = Sphere(radius=1, color=BLUE)
+        sphere = Sphere(radius=1.5, resolution=(32, 32)).set_color(BLUE).set_opacity(0.7)
         self.set_camera_orientation(phi=75*DEGREES, theta=30*DEGREES)
         self.add(axes)
-        self.play(Create(sphere))
-        self.begin_ambient_camera_rotation(rate=0.2)
-        self.wait(2)
+        self.play(Create(sphere), run_time=2)
+        self.begin_ambient_camera_rotation(rate=0.15)
+        self.wait(4)
 ```
 
 MANDATORY: Your response must start with 'from manim import *' followed by exactly one class definition.
@@ -223,10 +247,10 @@ def generate_manim_code(prompt: str, error_feedback: Optional[str] = None) -> st
     
     try:
         response = mistral_client.chat.complete(
-            model="mistral-large-latest",  # Using Mistral's most capable model for highest quality
+            model="mistral-large-latest",  # Mistral's most capable model for highest quality code
             messages=messages,
-            temperature=0.2,  # Low temperature for consistent code generation
-            max_tokens=3072
+            temperature=0.3,  # Slightly higher for more creative, detailed animations
+            max_tokens=8192   # More room for complex, high-quality scenes
         )
         
         code = response.choices[0].message.content.strip()
@@ -295,7 +319,7 @@ class RenderRequest(BaseModel):
     """Request payload for /render endpoint - Phase 3: Accepts natural language prompts"""
     prompt: str = Field(..., description="Natural language description of the animation to create")
     quality: Optional[str] = Field(default="h", description="Render quality: l(low), m(medium), h(high), k(4k)")
-    max_retries: Optional[int] = Field(default=3, description="Maximum self-correction attempts")
+    max_retries: Optional[int] = Field(default=5, description="Maximum self-correction attempts")
 
 class RenderRequestLegacy(BaseModel):
     """Legacy request format for backward compatibility (Phase 1/2)"""
@@ -505,7 +529,7 @@ def execute_manim_with_retries(
                 
                 # Detect LaTeX errors and provide specific guidance
                 if "latex" in error_feedback.lower() or "tex" in error_feedback.lower():
-                    error_feedback += "\n\nLaTeX is not available on this system. IMPORTANT: Use Text() instead of MathTex() or Tex(). For axis labels, use Text() like: axes.get_axis_labels(x_label=Text('x'), y_label=Text('y')). Avoid any LaTeX formatting."
+                    error_feedback += "\n\nNote: Full LaTeX IS available. If you got a LaTeX error, check for: unescaped special characters, missing braces, or unsupported packages. Use raw strings r'...' for all LaTeX. Prefer MathTex() for math and Text() for plain text."
                 
                 logger.warning(f"[Job {job_id}] Attempt {attempt} failed: {error_feedback[:200]}...")
                 update_job_status(
@@ -537,7 +561,7 @@ def execute_manim_with_retries(
 
 
 # Core Manim Execution Engine (refactored from Phase 1/2)
-def execute_manim_core(job_id: str, code: str, scene_name: str, quality: str = "l") -> Dict:
+def execute_manim_core(job_id: str, code: str, scene_name: str, quality: str = "h") -> Dict:
     """
     Phase 3 Refactor: Core Manim rendering logic (now returns Dict instead of updating Redis)
     
@@ -559,8 +583,9 @@ def execute_manim_core(job_id: str, code: str, scene_name: str, quality: str = "
         Dict with keys: success (bool), video_path (str), file_size (int), error (str)
     """
     # Constraint #4: Strict Filesystem Redirection
-    # All operations occur exclusively in /tmp directory
-    tmp_dir = Path("/tmp")
+    # Use platform-appropriate temp directory (cross-platform)
+    import tempfile
+    tmp_dir = Path(tempfile.gettempdir())
     script_path = tmp_dir / f"{job_id}_attempt.py"
     media_dir = tmp_dir / f"media_{job_id}"
     
@@ -800,10 +825,10 @@ async def render(request: RenderRequest, background_tasks: BackgroundTasks):
         )
     
     # Validate max_retries
-    if request.max_retries < 1 or request.max_retries > 5:
+    if request.max_retries < 1 or request.max_retries > 10:
         raise HTTPException(
             status_code=400,
-            detail="max_retries must be between 1 and 5"
+            detail="max_retries must be between 1 and 10"
         )
     
     # Phase 2 & 3: Initialize job in Redis with 'queued' status
