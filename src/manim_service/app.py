@@ -10,6 +10,8 @@ UPDATED: 2026-02-23 20:36 - ThreeDScene detection fixed with colon patterns
 import os
 import uuid
 import subprocess
+import signal
+import threading
 import logging
 import json
 import re
@@ -20,7 +22,7 @@ load_dotenv()
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 from datetime import datetime
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -76,7 +78,10 @@ else:
     logger.warning("Mistral API key not provided - LLM features disabled")
 
 # Initialize Supabase client (Phase 4 - Database & Storage)
+# Service role client for backend operations (full permissions, bypasses RLS)
 supabase_client: Optional[Client] = None
+# Anon client for user-facing auth operations (respects RLS)
+supabase_auth_client: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -96,6 +101,14 @@ if SUPABASE_URL and SUPABASE_KEY:
 else:
     logger.warning("Supabase credentials not provided - database and storage features disabled")
 
+# Initialize anon client for auth
+if SUPABASE_URL and SUPABASE_ANON_KEY:
+    try:
+        supabase_auth_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        logger.info("Supabase Auth client initialized (anon key)")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Supabase Auth client: {e}")
+
 # Initialize FastAPI application
 app = FastAPI(
     title="Manim Rendering Node",
@@ -107,7 +120,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -125,6 +138,35 @@ CRITICAL RULES:
 6. Use proper indentation (4 spaces)
 7. For 3D scenes, use ThreeDScene instead of Scene
 
+LAYOUT & POSITIONING — CRITICAL to prevent overlapping:
+- ALWAYS use .to_edge(UP) for titles/headings, then .next_to(title, DOWN, buff=0.5) for content below
+- NEVER place objects at the same position — always use .shift(), .to_edge(), .next_to() with adequate buff
+- Use buff=0.4 to 0.8 between adjacent elements (NEVER less than 0.3)
+- For multi-step content: clear previous objects with FadeOut before showing new ones, OR
+  shift old content up/aside before adding new content below
+- Use .scale_to_fit_width(config.frame_width - 2) if text/formulas might be too wide
+- For VGroups with multiple items, use .arrange(DOWN, buff=0.5) or .arrange(RIGHT, buff=0.5)
+- Title goes to_edge(UP), main content stays at ORIGIN or slightly below, footnotes to_edge(DOWN)
+- When showing equations + explanatory text together, put text ABOVE or BELOW the equation with .next_to(eq, DOWN, buff=0.5), never on top
+- Before animating new content, ALWAYS check if previous content overlaps and FadeOut or reposition it
+- Use .to_corner(UL), .to_corner(UR), etc. for corner placement
+- Maximum font_size for formulas: 40 (to avoid overflow). Use 32-36 for complex LaTeX expressions
+
+GRAPHS/AXES OVERLAP PREVENTION — EXTREMELY IMPORTANT:
+- When a scene has BOTH a title AND a graph/axes, you MUST shrink the axes so they fit BELOW the title
+- ALWAYS scale axes: axes.scale(0.6) or axes.scale(0.65) when there is a title present
+- ALWAYS shift axes down: axes.shift(DOWN * 0.5) after scaling, or use axes.next_to(title, DOWN, buff=0.4)
+- Set y_range to only what is needed — do NOT let the y-axis extend above the title
+- The Manim frame is 8 units wide x ~4.5 units tall (for 16:9). Title at top uses ~0.8 units. So axes must fit in ~3.5 units
+- For x_range and y_range, use tight ranges. For example y_range=[0, 10, 2] instead of y_range=[0, 100, 10]
+- Always test mentally: if your y-axis goes from 0-10 with scale(0.6), it takes 6 units — TOO TALL. Use scale(0.45) or reduce y_range.
+- FORMULA: max_axes_scale = 3.2 / (y_range_max - y_range_min). If y_range spans 10 units, scale must be ≤ 0.32
+- Place the equation label OUTSIDE the graph area, e.g., to_corner(UR) or next_to(axes, RIGHT)
+- Prefer using x_length and y_length params in Axes() to control physical size:
+  Axes(x_range=[...], y_range=[...], x_length=6, y_length=3) — this guarantees the axes fit
+- Data points (Dot) plotted on axes will stay within the axes bounds automatically if you use axes.c2p(x, y)
+- NEVER let plotted elements extend above the top 0.8 units of the frame (that space is reserved for titles)
+
 QUALITY GUIDELINES — follow these to make animations look professional:
 - Use smooth animations with appropriate run_time (e.g., 1.5-2.5 seconds per animation)
 - Add gentle pauses between animation steps (self.wait(0.5) to self.wait(2))
@@ -132,12 +174,13 @@ QUALITY GUIDELINES — follow these to make animations look professional:
 - Apply .set_color(), .set_fill(opacity=...), .set_stroke(width=...) for visual richness
 - Group related objects with VGroup and animate them together
 - Use rate_func (e.g., smooth, there_and_back, ease_in_out_sine) for polished motion
-- For titles/labels, use font_size=48 for titles, 36 for subtitles, 24-28 for labels
+- For titles/labels, use font_size=42 for titles, 32 for subtitles, 24-28 for labels
 - Add subtle background elements or reference frames when appropriate
 - Use .animate.shift(), .animate.scale(), .animate.set_color() for fluid transitions
 - Prefer ReplacementTransform over Transform when morphing between objects
 - Use SurroundingRectangle, Brace, Arrow to annotate and highlight key parts
 - For graphs, use smooth curves and label axes clearly
+- When showing step-by-step derivations, FadeOut previous steps or shift them up before showing next
 
 TEXT AND MATH RENDERING (Full LaTeX is available):
 - Use Text() for plain text (e.g., Text("Hello World", font_size=48))
@@ -157,36 +200,48 @@ Common 2D objects: Circle, Square, Rectangle, Text, Tex, MathTex, VGroup, Dot, A
 Common 3D objects: Sphere, Cube, Cylinder, Cone, Torus, Surface, ThreeDAxes,
                    ParametricSurface, Arrow3D, Line3D, Dot3D
 
-Example 2D with Math:
+Example 2D with Math (note proper layout spacing):
 ```python
 from manim import *
 
 class QuadraticFormula(Scene):
     def construct(self):
-        title = Text("Quadratic Formula", font_size=48, color=BLUE)
-        formula = MathTex(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}", font_size=44)
+        title = Text("Quadratic Formula", font_size=42, color=BLUE)
+        title.to_edge(UP, buff=0.5)
         self.play(Write(title))
         self.wait(0.5)
-        self.play(title.animate.to_edge(UP))
+        
+        equation = MathTex(r"ax^2 + bx + c = 0", font_size=36, color=WHITE)
+        equation.next_to(title, DOWN, buff=0.6)
+        self.play(Write(equation))
+        self.wait(0.5)
+        
+        formula = MathTex(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}", font_size=38)
+        formula.next_to(equation, DOWN, buff=0.8)
         self.play(Write(formula), run_time=2)
+        
         box = SurroundingRectangle(formula, color=YELLOW, buff=0.3)
         self.play(Create(box))
         self.wait(2)
 ```
 
-Example 2D Graph:
+Example 2D Graph (note x_length/y_length to control size, and positioning below title):
 ```python
 from manim import *
 
 class SimpleGraph(Scene):
     def construct(self):
+        title = Text("Parabola", font_size=42, color=BLUE).to_edge(UP, buff=0.3)
+        self.play(Write(title))
+        
         axes = Axes(
-            x_range=[-3, 3, 1], y_range=[-1, 9, 1],
+            x_range=[-3, 3, 1], y_range=[-1, 9, 2],
+            x_length=6, y_length=3,
             axis_config={"include_numbers": True}
-        )
+        ).next_to(title, DOWN, buff=0.3)
         labels = axes.get_axis_labels(x_label="x", y_label="y")
         graph = axes.plot(lambda x: x**2, color=BLUE, x_range=[-3, 3])
-        graph_label = axes.get_graph_label(graph, label=MathTex(r"x^2"), x_val=2, direction=UP)
+        graph_label = axes.get_graph_label(graph, label=MathTex(r"x^2"), x_val=2, direction=UR)
         self.play(Create(axes), Write(labels), run_time=1.5)
         self.play(Create(graph), Write(graph_label), run_time=2)
         self.wait(2)
@@ -320,6 +375,7 @@ class RenderRequest(BaseModel):
     prompt: str = Field(..., description="Natural language description of the animation to create")
     quality: Optional[str] = Field(default="h", description="Render quality: l(low), m(medium), h(high), k(4k)")
     max_retries: Optional[int] = Field(default=5, description="Maximum self-correction attempts")
+    user_id: Optional[str] = Field(default=None, description="Authenticated user ID")
 
 class RenderRequestLegacy(BaseModel):
     """Legacy request format for backward compatibility (Phase 1/2)"""
@@ -349,7 +405,70 @@ class JobStatusResponse(BaseModel):
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
+# ============================================================
+# Phase 5: Auth Pydantic Models
+# ============================================================
+class SignUpRequest(BaseModel):
+    email: str = Field(..., description="User email address")
+    password: str = Field(..., min_length=6, description="Password (min 6 chars)")
+    display_name: Optional[str] = Field(default=None, description="Display name")
+
+class SignInRequest(BaseModel):
+    email: str = Field(..., description="User email address")
+    password: str = Field(..., description="Password")
+
+class AuthResponse(BaseModel):
+    success: bool
+    message: str
+    user: Optional[dict] = None
+    session: Optional[dict] = None
+
+class UserProfileResponse(BaseModel):
+    id: str
+    email: str
+    display_name: Optional[str] = None
+    total_videos: int = 0
+    created_at: Optional[str] = None
+
+class VideoHistoryItem(BaseModel):
+    job_id: str
+    prompt: str
+    video_url: Optional[str] = None
+    status: str
+    created_at: str
+    quality: Optional[str] = None
+
+
+# ============================================================
+# Phase 5: Auth Helper - Extract user from token
+# ============================================================
+async def get_current_user(authorization: Optional[str] = Header(default=None)) -> Optional[dict]:
+    """Extract user from Bearer token. Returns None if not authenticated (allows anonymous usage)."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    
+    token = authorization.replace("Bearer ", "")
+    if not supabase_client:
+        return None
+    
+    try:
+        user_response = supabase_client.auth.get_user(token)
+        if user_response and user_response.user:
+            return {
+                "id": str(user_response.user.id),
+                "email": user_response.user.email
+            }
+    except Exception as e:
+        logger.warning(f"Token validation failed: {e}")
+    return None
+
+
 # Helper function: Update job status in Redis
+# Track active subprocesses per job_id so they can be killed on cancel
+_active_processes: Dict[str, subprocess.Popen] = {}
+_active_processes_lock = threading.Lock()
+
+
 def update_job_status(job_id: str, status: str, **kwargs):
     """Update job status in Redis if client is available"""
     if not redis_client:
@@ -447,7 +566,8 @@ def execute_manim_with_retries(
     job_id: str, 
     prompt: str, 
     quality: str = "h",
-    max_retries: int = 3
+    max_retries: int = 3,
+    user_id: Optional[str] = None
 ):
     """
     Phase 3: AI-Driven Rendering with Self-Correction Loop
@@ -468,7 +588,25 @@ def execute_manim_with_retries(
     
     error_feedback = None
     
+    def is_cancelled():
+        """Check if the job has been cancelled by the user"""
+        if not redis_client:
+            return False
+        try:
+            job_data_json = redis_client.get(f"job:{job_id}")
+            if job_data_json:
+                job_data = json.loads(job_data_json)
+                return job_data.get("status") == "cancelled"
+        except Exception:
+            pass
+        return False
+
     for attempt in range(1, max_retries + 1):
+        # Check for cancellation before each attempt
+        if is_cancelled():
+            logger.info(f"[Job {job_id}] Cancelled by user before attempt {attempt}")
+            return
+        
         logger.info(f"[Job {job_id}] Attempt {attempt}/{max_retries}")
         
         try:
@@ -501,10 +639,24 @@ def execute_manim_with_retries(
                 generated_code=code[:500]
             )
             
+            # Check for cancellation before rendering
+            if is_cancelled():
+                logger.info(f"[Job {job_id}] Cancelled by user before rendering")
+                return
+            
             # Step 3: Execute Manim rendering
             result = execute_manim_core(job_id, code, scene_name, quality)
             
+            if result.get("cancelled"):
+                logger.info(f"[Job {job_id}] Render was cancelled - stopping")
+                return
+            
             if result["success"]:
+                # Check cancellation one final time before saving
+                if is_cancelled():
+                    logger.info(f"[Job {job_id}] Cancelled after render - skipping save")
+                    return
+                
                 # Success! Update Redis and return
                 logger.info(f"[Job {job_id}] Render succeeded on attempt {attempt}")
                 
@@ -522,6 +674,37 @@ def execute_manim_with_retries(
                     status_data["video_url"] = result["storage_url"]
                 
                 update_job_status(job_id, "completed", **status_data)
+                
+                # Phase 5: Save to Supabase DB for user history
+                if supabase_client:
+                    try:
+                        # Insert render_jobs record
+                        job_record = {
+                            "job_id": job_id,
+                            "prompt": prompt,
+                            "status": "completed",
+                            "retry_count": attempt,
+                            "metadata": {"quality": quality, "scene_name": scene_name}
+                        }
+                        if user_id:
+                            job_record["user_id"] = user_id
+                        supabase_client.table("render_jobs").upsert(job_record, on_conflict="job_id").execute()
+                        
+                        # Insert generated_videos record
+                        video_record = {
+                            "job_id": job_id,
+                            "video_url": result.get("storage_url", ""),
+                            "file_size_bytes": result.get("file_size"),
+                            "resolution": {"l": "480p", "m": "720p", "h": "1080p", "k": "4K"}.get(quality, "1080p"),
+                            "metadata": {"scene_name": scene_name, "attempts": attempt}
+                        }
+                        if user_id:
+                            video_record["user_id"] = user_id
+                        supabase_client.table("generated_videos").insert(video_record).execute()
+                        logger.info(f"[Job {job_id}] Saved to Supabase DB (user_id={user_id})")
+                    except Exception as db_err:
+                        logger.error(f"[Job {job_id}] Failed to save to Supabase DB: {db_err}")
+                
                 return
             else:
                 # Manim execution failed, prepare feedback for next attempt
@@ -615,17 +798,54 @@ def execute_manim_core(job_id: str, code: str, scene_name: str, quality: str = "
         
         logger.info(f"[Job {job_id}] Executing command: {' '.join(manim_command)}")
         
-        # Subprocess Execution with timeout protection
-        result = subprocess.run(
+        # Subprocess Execution with Popen so we can cancel mid-render
+        proc = subprocess.Popen(
             manim_command,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minute timeout for safety
-            check=True
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
         )
         
+        # Register the process so the cancel endpoint can kill it
+        with _active_processes_lock:
+            _active_processes[job_id] = proc
+        
+        try:
+            stdout, stderr = proc.communicate(timeout=300)  # 5 minute timeout
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            with _active_processes_lock:
+                _active_processes.pop(job_id, None)
+            raise
+        finally:
+            with _active_processes_lock:
+                _active_processes.pop(job_id, None)
+        
+        # Check if process was killed (cancelled)
+        # On Linux, killed processes have negative returncode (-9 for SIGKILL)
+        # On Windows, TerminateProcess gives returncode 1, so also check Redis
+        was_killed_by_signal = proc.returncode != 0 and proc.returncode < 0
+        was_cancelled_in_redis = False
+        if redis_client:
+            try:
+                job_data_json = redis_client.get(f"job:{job_id}")
+                if job_data_json:
+                    job_data = json.loads(job_data_json)
+                    was_cancelled_in_redis = job_data.get("status") == "cancelled"
+            except Exception:
+                pass
+        
+        if was_killed_by_signal or was_cancelled_in_redis:
+            logger.info(f"[Job {job_id}] Process was cancelled (returncode={proc.returncode}, redis_cancelled={was_cancelled_in_redis})")
+            return {"success": False, "error": "Cancelled by user", "cancelled": True}
+        
+        if proc.returncode != 0:
+            error_msg = f"Manim execution failed:\n{stderr if stderr else stdout}"
+            return {"success": False, "error": error_msg}
+        
         logger.info(f"[Job {job_id}] Render completed successfully")
-        logger.info(f"[Job {job_id}] STDOUT: {result.stdout}")
+        logger.info(f"[Job {job_id}] STDOUT: {stdout}")
         
         # Find the generated video file
         video_files = list(media_dir.glob(f"**/{scene_name}.mp4"))
@@ -633,6 +853,16 @@ def execute_manim_core(job_id: str, code: str, scene_name: str, quality: str = "
             video_path = video_files[0]
             logger.info(f"[Job {job_id}] Video generated at: {video_path}")
             logger.info(f"[Job {job_id}] File size: {video_path.stat().st_size} bytes")
+            
+            # Check cancellation one more time before uploading
+            if redis_client:
+                try:
+                    _jd = redis_client.get(f"job:{job_id}")
+                    if _jd and json.loads(_jd).get("status") == "cancelled":
+                        logger.info(f"[Job {job_id}] Cancelled - skipping storage upload")
+                        return {"success": False, "error": "Cancelled by user", "cancelled": True}
+                except Exception:
+                    pass
             
             # Phase 4: Upload to Supabase Storage
             storage_url = upload_to_supabase_storage(video_path, job_id, scene_name)
@@ -662,18 +892,6 @@ def execute_manim_core(job_id: str, code: str, scene_name: str, quality: str = "
                 "success": False,
                 "error": "No video file generated - Manim completed but no output found"
             }
-        
-    except subprocess.CalledProcessError as e:
-        # Graceful Degradation: Capture compilation errors for self-correction
-        logger.error(f"[Job {job_id}] Manim rendering failed with exit code {e.returncode}")
-        logger.error(f"[Job {job_id}] STDERR: {e.stderr}")
-        
-        # Return error for LLM to correct
-        error_msg = f"Manim execution failed:\\n{e.stderr if e.stderr else e.stdout}"
-        return {
-            "success": False,
-            "error": error_msg
-        }
         
     except subprocess.TimeoutExpired as e:
         logger.error(f"[Job {job_id}] Rendering timed out after 5 minutes")
@@ -784,7 +1002,7 @@ async def health_check():
 
 
 @app.post("/render", response_model=RenderResponse)
-async def render(request: RenderRequest, background_tasks: BackgroundTasks):
+async def render(request: RenderRequest, background_tasks: BackgroundTasks, current_user: Optional[dict] = Depends(get_current_user)):
     """
     POST /render - Phase 3: AI-Driven Render Endpoint
     
@@ -843,12 +1061,20 @@ async def render(request: RenderRequest, background_tasks: BackgroundTasks):
     )
     
     # Delegate to Phase 3 self-correction pipeline
+    # Phase 5: Pass user_id from auth token or request body
+    user_id = None
+    if current_user:
+        user_id = current_user["id"]
+    elif request.user_id:
+        user_id = request.user_id
+    
     background_tasks.add_task(
         execute_manim_with_retries,
         job_id=job_id,
         prompt=request.prompt,
         quality=request.quality,
-        max_retries=request.max_retries
+        max_retries=request.max_retries,
+        user_id=user_id
     )
     
     logger.info(f"[Job {job_id}] AI render job accepted and queued")
@@ -918,6 +1144,49 @@ async def render_code(request: RenderRequestLegacy, background_tasks: Background
     )
 
 
+@app.post("/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    """
+    POST /cancel/{job_id} - Cancel a running job
+    
+    Sets the job status to 'cancelled' in Redis so the background
+    processing loop will stop at the next check point.
+    """
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="State management not available")
+    
+    try:
+        job_data_json = redis_client.get(f"job:{job_id}")
+        if not job_data_json:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        
+        job_data = json.loads(job_data_json)
+        current_status = job_data.get("status")
+        
+        if current_status in ("completed", "failed", "cancelled"):
+            return {"message": f"Job already {current_status}", "job_id": job_id}
+        
+        update_job_status(job_id, "cancelled", previous_status=current_status)
+        
+        # Kill the active subprocess if it's running
+        with _active_processes_lock:
+            proc = _active_processes.pop(job_id, None)
+        if proc:
+            try:
+                proc.kill()
+                logger.info(f"[Job {job_id}] Killed active rendering subprocess")
+            except Exception as kill_err:
+                logger.warning(f"[Job {job_id}] Failed to kill subprocess: {kill_err}")
+        
+        logger.info(f"[Job {job_id}] Cancelled by user (was: {current_status})")
+        return {"message": "Job cancelled successfully", "job_id": job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Job {job_id}] Cancel failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/status/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
     """
@@ -962,6 +1231,175 @@ async def get_job_status(job_id: str):
             status_code=500,
             detail=f"Failed to query job status: {str(e)}"
         )
+
+
+# ============================================================
+# Phase 5: Authentication Endpoints
+# ============================================================
+
+@app.post("/auth/signup", response_model=AuthResponse)
+async def signup(request: SignUpRequest):
+    """Register a new user with email and password"""
+    if not supabase_auth_client:
+        raise HTTPException(status_code=503, detail="Authentication service not available")
+    
+    try:
+        # Sign up with Supabase Auth
+        options = {}
+        if request.display_name:
+            options["data"] = {"display_name": request.display_name}
+        
+        response = supabase_auth_client.auth.sign_up({
+            "email": request.email,
+            "password": request.password,
+            "options": options
+        })
+        
+        if response.user:
+            user_data = {
+                "id": str(response.user.id),
+                "email": response.user.email,
+                "created_at": str(response.user.created_at) if response.user.created_at else None
+            }
+            session_data = None
+            if response.session:
+                session_data = {
+                    "access_token": response.session.access_token,
+                    "refresh_token": response.session.refresh_token,
+                    "expires_in": response.session.expires_in,
+                    "token_type": "bearer"
+                }
+            return AuthResponse(
+                success=True,
+                message="Account created successfully. Please check your email to confirm.",
+                user=user_data,
+                session=session_data
+            )
+        else:
+            return AuthResponse(success=False, message="Sign up failed. Please try again.")
+            
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Sign up failed: {error_msg}")
+        if "already registered" in error_msg.lower() or "already been registered" in error_msg.lower():
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+        raise HTTPException(status_code=400, detail=f"Sign up failed: {error_msg}")
+
+
+@app.post("/auth/signin", response_model=AuthResponse)
+async def signin(request: SignInRequest):
+    """Sign in with email and password"""
+    if not supabase_auth_client:
+        raise HTTPException(status_code=503, detail="Authentication service not available")
+    
+    try:
+        response = supabase_auth_client.auth.sign_in_with_password({
+            "email": request.email,
+            "password": request.password
+        })
+        
+        if response.user and response.session:
+            user_data = {
+                "id": str(response.user.id),
+                "email": response.user.email,
+            }
+            session_data = {
+                "access_token": response.session.access_token,
+                "refresh_token": response.session.refresh_token,
+                "expires_in": response.session.expires_in,
+                "token_type": "bearer"
+            }
+            return AuthResponse(
+                success=True,
+                message="Signed in successfully.",
+                user=user_data,
+                session=session_data
+            )
+        else:
+            return AuthResponse(success=False, message="Invalid credentials.")
+            
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Sign in failed: {error_msg}")
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+
+@app.post("/auth/signout")
+async def signout(current_user: Optional[dict] = Depends(get_current_user)):
+    """Sign out the current user"""
+    return {"success": True, "message": "Signed out successfully."}
+
+
+@app.get("/auth/me", response_model=UserProfileResponse)
+async def get_me(current_user: Optional[dict] = Depends(get_current_user)):
+    """Get current authenticated user's profile"""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    if not supabase_client:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        result = supabase_client.table("user_profiles").select("*").eq("id", current_user["id"]).single().execute()
+        if result.data:
+            return UserProfileResponse(
+                id=result.data["id"],
+                email=result.data["email"],
+                display_name=result.data.get("display_name"),
+                total_videos=result.data.get("total_videos", 0),
+                created_at=str(result.data.get("created_at", ""))
+            )
+    except Exception as e:
+        logger.error(f"Failed to fetch profile: {e}")
+    
+    # Fallback: return basic info from token
+    return UserProfileResponse(
+        id=current_user["id"],
+        email=current_user["email"],
+        total_videos=0
+    )
+
+
+# ============================================================
+# Phase 5: User History Endpoint
+# ============================================================
+
+@app.get("/user/history")
+async def get_user_history(current_user: Optional[dict] = Depends(get_current_user)):
+    """Get all videos created by the authenticated user"""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated. Please sign in.")
+    
+    if not supabase_client:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        # Fetch user's render jobs with video URLs
+        result = supabase_client.table("render_jobs").select(
+            "job_id, prompt, status, created_at, metadata, generated_videos(video_url, file_size_bytes, resolution, created_at)"
+        ).eq("user_id", current_user["id"]).order("created_at", desc=True).limit(50).execute()
+        
+        videos = []
+        if result.data:
+            for job in result.data:
+                video_url = None
+                if job.get("generated_videos") and len(job["generated_videos"]) > 0:
+                    video_url = job["generated_videos"][0].get("video_url")
+                
+                videos.append({
+                    "job_id": job["job_id"],
+                    "prompt": job["prompt"],
+                    "status": job["status"],
+                    "video_url": video_url,
+                    "quality": job.get("metadata", {}).get("quality", "h"),
+                    "created_at": job["created_at"]
+                })
+        
+        return {"videos": videos, "total": len(videos)}
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch user history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
 
 
 # Startup event
@@ -1025,6 +1463,13 @@ if _frontend_dist.exists():
     # Add /api/* aliases so the frontend (which uses /api/render etc.) works in production
     app.add_api_route("/api/render", render, methods=["POST"], response_model=RenderResponse)
     app.add_api_route("/api/status/{job_id}", get_job_status, methods=["GET"], response_model=JobStatusResponse)
+    app.add_api_route("/api/cancel/{job_id}", cancel_job, methods=["POST"])
+    # Phase 5: Auth and History API routes
+    app.add_api_route("/api/auth/signup", signup, methods=["POST"], response_model=AuthResponse)
+    app.add_api_route("/api/auth/signin", signin, methods=["POST"], response_model=AuthResponse)
+    app.add_api_route("/api/auth/signout", signout, methods=["POST"])
+    app.add_api_route("/api/auth/me", get_me, methods=["GET"], response_model=UserProfileResponse)
+    app.add_api_route("/api/user/history", get_user_history, methods=["GET"])
 
     # Mount static assets
     app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="assets")

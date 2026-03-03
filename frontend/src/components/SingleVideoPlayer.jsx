@@ -44,7 +44,7 @@ const SingleVideoPlayer = ({ video }) => {
               download={`manim-video-${video.id}.mp4`}
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
-              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full hover:from-blue-700 hover:to-purple-700 transition-all text-white font-medium shadow-lg"
+              className="flex items-center gap-2 px-4 py-2 bg-white text-black rounded-full hover:bg-gray-200 transition-all font-medium shadow-lg"
             >
               <Download className="w-4 h-4" />
               <span>Download</span>

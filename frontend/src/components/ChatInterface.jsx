@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   Sparkles,
-  Send
+  Send,
+  Square
 } from 'lucide-react'
 import axios from 'axios'
 
@@ -12,6 +13,10 @@ const ChatInterface = ({ onVideoGenerated }) => {
   const [progress, setProgress] = useState(0)
   const [currentJobId, setCurrentJobId] = useState(null)
   const textareaRef = useRef(null)
+  const pollIntervalRef = useRef(null)
+  const progressIntervalRef = useRef(null)
+  const timeoutRef = useRef(null)
+  const isCancelledRef = useRef(false)
 
   // Auto-resize textarea
   useEffect(() => {
@@ -21,12 +26,49 @@ const ChatInterface = ({ onVideoGenerated }) => {
     }
   }, [prompt])
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      clearInterval(pollIntervalRef.current)
+      clearInterval(progressIntervalRef.current)
+      clearTimeout(timeoutRef.current)
+    }
+  }, [])
+
+  const cleanupTimers = useCallback(() => {
+    clearInterval(pollIntervalRef.current)
+    clearInterval(progressIntervalRef.current)
+    clearTimeout(timeoutRef.current)
+    pollIntervalRef.current = null
+    progressIntervalRef.current = null
+    timeoutRef.current = null
+  }, [])
+
+  const handleStop = useCallback(async () => {
+    isCancelledRef.current = true
+    cleanupTimers()
+    
+    // Tell the backend to cancel the job
+    if (currentJobId) {
+      try {
+        await axios.post(`/api/cancel/${currentJobId}`)
+      } catch (err) {
+        console.error('Cancel request failed:', err)
+      }
+    }
+    
+    setIsLoading(false)
+    setProgress(0)
+    setCurrentJobId(null)
+  }, [currentJobId, cleanupTimers])
+
   const handleSubmit = async (e) => {
     e?.preventDefault()
     if (!prompt.trim() || isLoading) return
 
     setIsLoading(true)
     setProgress(0)
+    isCancelledRef.current = false
     
     try {
       // Submit render job
@@ -39,42 +81,49 @@ const ChatInterface = ({ onVideoGenerated }) => {
 
       // Simulate progress while polling
       let progressValue = 0
-      const progressInterval = setInterval(() => {
+      progressIntervalRef.current = setInterval(() => {
         progressValue += Math.random() * 15
         if (progressValue > 90) progressValue = 90
         setProgress(progressValue)
       }, 500)
 
       // Poll for completion
-      const pollInterval = setInterval(async () => {
+      pollIntervalRef.current = setInterval(async () => {
+        if (isCancelledRef.current) return
         try {
           const statusResponse = await axios.get(`/api/status/${job_id}`)
           const { status, video_url, error } = statusResponse.data
 
           if (status === 'completed') {
-            clearInterval(pollInterval)
-            clearInterval(progressInterval)
+            cleanupTimers()
             setProgress(100)
+            const savedPrompt = prompt.trim()
             setTimeout(() => {
               setIsLoading(false)
               setProgress(0)
               setPrompt('')
+              setCurrentJobId(null)
             }, 500)
             
             if (video_url) {
               onVideoGenerated({
                 id: job_id,
-                prompt: prompt.trim(),
+                prompt: savedPrompt,
                 url: video_url,
                 timestamp: new Date().toISOString()
               })
             }
           } else if (status === 'failed') {
-            clearInterval(pollInterval)
-            clearInterval(progressInterval)
+            cleanupTimers()
             setIsLoading(false)
             setProgress(0)
+            setCurrentJobId(null)
             alert(`Video generation failed: ${error || 'Unknown error'}`)
+          } else if (status === 'cancelled') {
+            cleanupTimers()
+            setIsLoading(false)
+            setProgress(0)
+            setCurrentJobId(null)
           }
         } catch (err) {
           console.error('Polling error:', err)
@@ -82,12 +131,12 @@ const ChatInterface = ({ onVideoGenerated }) => {
       }, 2000)
 
       // Timeout after 5 minutes
-      setTimeout(() => {
-        clearInterval(pollInterval)
-        clearInterval(progressInterval)
-        if (isLoading) {
+      timeoutRef.current = setTimeout(() => {
+        if (!isCancelledRef.current) {
+          cleanupTimers()
           setIsLoading(false)
           setProgress(0)
+          setCurrentJobId(null)
           alert('Video generation timed out. Please try again.')
         }
       }, 300000)
@@ -96,6 +145,7 @@ const ChatInterface = ({ onVideoGenerated }) => {
       console.error('Error submitting prompt:', error)
       setIsLoading(false)
       setProgress(0)
+      setCurrentJobId(null)
       alert('Failed to submit prompt. Please try again.')
     }
   }
@@ -168,23 +218,37 @@ const ChatInterface = ({ onVideoGenerated }) => {
               rows={1}
             />
 
-            {/* Send Button */}
+            {/* Send / Stop Button */}
             <div className="flex justify-end px-4 pb-3">
-              <motion.button
-                onClick={handleSubmit}
-                disabled={!prompt.trim() || isLoading}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                className={`
-                  p-3 rounded-full transition-all duration-300
-                  ${prompt.trim() && !isLoading
-                    ? 'bg-white text-black hover:bg-gray-200 shadow-lg shadow-white/20'
-                    : 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                  }
-                `}
-              >
-                <Send className="w-5 h-5" />
-              </motion.button>
+              {isLoading ? (
+                <motion.button
+                  onClick={handleStop}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  initial={{ scale: 0.8 }}
+                  animate={{ scale: 1 }}
+                  className="p-3 rounded-full transition-all duration-300 bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/20"
+                  title="Stop generation"
+                >
+                  <Square className="w-5 h-5 fill-current" />
+                </motion.button>
+              ) : (
+                <motion.button
+                  onClick={handleSubmit}
+                  disabled={!prompt.trim()}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  className={`
+                    p-3 rounded-full transition-all duration-300
+                    ${prompt.trim()
+                      ? 'bg-white text-black hover:bg-gray-200 shadow-lg shadow-white/20'
+                      : 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                    }
+                  `}
+                >
+                  <Send className="w-5 h-5" />
+                </motion.button>
+              )}
             </div>
           </div>
 
