@@ -22,6 +22,10 @@ WORKDIR /app
 RUN mkdir -p /tmp /app && \
     chown -R 1000:1000 /tmp /app
 
+# Install build tools needed for C extensions (pyiceberg, pyroaring)
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy requirements and install extra Python dependencies
 # (Manim itself is already installed in the base image)
 COPY requirements.txt .
