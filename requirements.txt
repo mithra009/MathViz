@@ -1,7 +1,7 @@
 # Phase 1, 2 & 3: Manim Rendering Node - Python Dependencies
 
-# Core Manim library
-manim==0.18.0
+# Core Manim library — already installed in manimcommunity/manim:latest base image
+# Do NOT install here; the base image pins the correct version for its Python.
 
 # FastAPI web framework for asynchronous API orchestration
 fastapi==0.109.0
@@ -24,9 +24,7 @@ supabase==2.18.0
 # Environment variable management
 python-dotenv==1.0.0
 
-# Additional Manim dependencies (compatible versions)
-# Note: Manim 0.18.0 requires Pillow<10.0, so we let it pull compatible versions
-# These will be auto-installed with manim, but listed for clarity
+# Additional Manim dependencies are provided by the base image
 
 # Python multipart for handling file uploads (if needed in future)
 python-multipart==0.0.6
