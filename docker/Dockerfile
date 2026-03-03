@@ -18,16 +18,9 @@ USER root
 WORKDIR /app
 
 # HuggingFace Spaces requires UID 1000. The base image already has a user
-# with UID 1000, so reuse it (or create if missing) and ensure /tmp and /app
-# are writable.
-RUN existing_user=$(getent passwd 1000 | cut -d: -f1) && \
-    if [ -z "$existing_user" ]; then \
-        useradd -m -u 1000 manim_user; \
-    else \
-        usermod -l manim_user -d /home/manim_user -m "$existing_user" 2>/dev/null || true; \
-    fi && \
-    mkdir -p /tmp /home/manim_user && \
-    chown -R 1000:1000 /tmp /app /home/manim_user
+# with UID 1000, so just ensure directories are writable.
+RUN mkdir -p /tmp /app && \
+    chown -R 1000:1000 /tmp /app
 
 # Copy requirements and install extra Python dependencies
 # (Manim itself is already installed in the base image)
@@ -40,8 +33,8 @@ COPY src/ ./src/
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
-# Switch to non-root user (Constraint #4)
-USER manim_user
+# Switch to non-root user by UID (Constraint #4)
+USER 1000
 
 # Expose port for FastAPI
 EXPOSE 7860
