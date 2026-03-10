@@ -41,6 +41,8 @@ MathViz accepts a plain-English description of a mathematical concept (e.g. *"an
 | Containerised & serverless-ready | Runs on Hugging Face Spaces free tier |
 | Non-root Docker execution | UID 1000 for HuggingFace Spaces compliance |
 | React chat interface | Real-time progress bar, video gallery, and playback |
+| Sign in / Sign up | Secure authentication with email/password |
+| User video history | View, search, and manage your previously rendered videos |
 
 ---
 
@@ -360,6 +362,16 @@ The React SPA is automatically served by FastAPI from `frontend/dist` after the 
 | `VideoGallery.jsx` | Grid of previously rendered videos |
 | `SingleVideoPlayer.jsx` | Full-screen video playback |
 | `Tooltip.jsx` | Hover helpers |
+
+**Authentication & User History**
+
+- `AuthPage.jsx`: Handles user sign in, sign up, and error feedback. New users can register with email, password, and display name. Email confirmation is supported. Existing users can sign in securely.
+- `VideoHistory.jsx`: Displays a searchable, filterable list of all videos rendered by the signed-in user. Users can view, download, and search their video history. Fetches data from `/api/user/history`.
+
+**User Flow**
+
+1. **Sign Up / Sign In**: Users can create an account or log in using their email and password. After sign up, email confirmation may be required.
+2. **Video History**: Once signed in, users can access their personal video history, search previous prompts, and manage their videos directly from the interface.
 
 ---
 
